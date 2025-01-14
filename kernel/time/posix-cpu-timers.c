@@ -14,6 +14,7 @@
 #include <linux/tick.h>
 #include <linux/workqueue.h>
 #include <linux/compat.h>
+#include <linux/sched/deadline.h>
 
 #include "posix-timers.h"
 
@@ -576,7 +577,7 @@ static int posix_cpu_timer_set(struct k_itimer *timer, int timer_flags,
 	unsigned long flags;
 	struct sighand_struct *sighand;
 	struct task_struct *p = timer->it.cpu.task;
-	u64 old_expires, new_expires, old_incr, val;
+	u64 old_expires, new_expires, old_incr, val = 0;
 	int ret;
 
 	WARN_ON_ONCE(p == NULL);
@@ -716,7 +717,7 @@ static int posix_cpu_timer_set(struct k_itimer *timer, int timer_flags,
 
 static void posix_cpu_timer_get(struct k_itimer *timer, struct itimerspec64 *itp)
 {
-	u64 now;
+	u64 now = 0;
 	struct task_struct *p = timer->it.cpu.task;
 
 	WARN_ON_ONCE(p == NULL);
@@ -792,6 +793,14 @@ check_timers_list(struct list_head *timers,
 	return 0;
 }
 
+static inline void check_dl_overrun(struct task_struct *tsk)
+{
+	if (tsk->dl.dl_overrun) {
+		tsk->dl.dl_overrun = 0;
+		__group_send_sig_info(SIGXCPU, SEND_SIG_PRIV, tsk);
+	}
+}
+
 /*
  * Check for any per-thread CPU timers that have fired and move them off
  * the tsk->cpu_timers[N] list onto the firing list.  Here we update the
@@ -804,6 +813,9 @@ static void check_thread_timers(struct task_struct *tsk,
 	struct task_cputime *tsk_expires = &tsk->cputime_expires;
 	u64 expires;
 	unsigned long soft;
+
+	if (dl_task(tsk))
+		check_dl_overrun(tsk);
 
 	/*
 	 * If cputime_expires is zero, then there are no active
@@ -907,6 +919,9 @@ static void check_process_timers(struct task_struct *tsk,
 	struct task_cputime cputime;
 	unsigned long soft;
 
+	if (dl_task(tsk))
+		check_dl_overrun(tsk);
+
 	/*
 	 * If cputimer is not running, then there are no active
 	 * process wide timers (POSIX 1.b, itimers, RLIMIT_CPU).
@@ -993,7 +1008,7 @@ static void posix_cpu_timer_rearm(struct k_itimer *timer)
 	struct sighand_struct *sighand;
 	unsigned long flags;
 	struct task_struct *p = timer->it.cpu.task;
-	u64 now;
+	u64 now = 0;
 
 	WARN_ON_ONCE(p == NULL);
 
@@ -1112,6 +1127,9 @@ static inline int fastpath_timer_check(struct task_struct *tsk)
 			return 1;
 	}
 
+	if (dl_task(tsk) && tsk->dl.dl_overrun)
+		return 1;
+
 	return 0;
 }
 
@@ -1187,7 +1205,7 @@ void run_posix_cpu_timers(struct task_struct *tsk)
 void set_process_cpu_timer(struct task_struct *tsk, unsigned int clock_idx,
 			   u64 *newval, u64 *oldval)
 {
-	u64 now;
+	u64 now = 0;
 
 	WARN_ON_ONCE(clock_idx == CPUCLOCK_SCHED);
 	cpu_timer_sample_group(clock_idx, tsk, &now);
@@ -1348,8 +1366,8 @@ static int posix_cpu_nsleep(const clockid_t which_clock, int flags,
 		if (flags & TIMER_ABSTIME)
 			return -ERESTARTNOHAND;
 
-		restart_block->fn = posix_cpu_nsleep_restart;
 		restart_block->nanosleep.clockid = which_clock;
+		set_restart_fn(restart_block, posix_cpu_nsleep_restart);
 	}
 	return error;
 }
