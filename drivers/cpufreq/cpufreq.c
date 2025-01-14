@@ -30,6 +30,9 @@
 #include <linux/suspend.h>
 #include <linux/syscore_ops.h>
 #include <linux/tick.h>
+#include <linux/sched/topology.h>
+#include <linux/sched/sysctl.h>
+
 #include <trace/events/power.h>
 
 static LIST_HEAD(cpufreq_policy_list);
@@ -655,10 +658,39 @@ static ssize_t show_##file_name				\
 }
 
 show_one(cpuinfo_min_freq, cpuinfo.min_freq);
-show_one(cpuinfo_max_freq, cpuinfo.max_freq);
 show_one(cpuinfo_transition_latency, cpuinfo.transition_latency);
 show_one(scaling_min_freq, min);
 show_one(scaling_max_freq, max);
+
+unsigned int cpuinfo_max_freq_cached;
+
+static bool should_use_cached_freq(int cpu)
+{
+	/* This is a safe check. may not be needed */
+	if (!cpuinfo_max_freq_cached)
+		return false;
+
+	/*
+	 * perfd already configure sched_lib_mask_force to
+	 * 0xf0 from user space. so re-using it.
+	 */
+	if (!(BIT(cpu) & sched_lib_mask_force))
+		return false;
+
+	return is_sched_lib_based_app(current->pid);
+}
+
+static ssize_t show_cpuinfo_max_freq(struct cpufreq_policy *policy, char *buf)
+{
+	unsigned int freq = policy->cpuinfo.max_freq;
+
+	if (should_use_cached_freq(policy->cpu))
+		freq = cpuinfo_max_freq_cached << 1;
+	else
+		freq = policy->cpuinfo.max_freq;
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", freq);
+}
 
 __weak unsigned int arch_freq_get_on_cpu(int cpu)
 {
@@ -697,6 +729,9 @@ static ssize_t store_##file_name					\
 	memcpy(&new_policy, policy, sizeof(*policy));			\
 	new_policy.min = policy->user_policy.min;			\
 	new_policy.max = policy->user_policy.max;			\
+									\
+	new_policy.min = new_policy.user_policy.min;			\
+	new_policy.max = new_policy.user_policy.max;			\
 									\
 	ret = sscanf(buf, "%u", &new_policy.object);			\
 	if (ret != 1)							\
@@ -1066,7 +1101,8 @@ static int cpufreq_add_policy_cpu(struct cpufreq_policy *policy, unsigned int cp
 	if (has_target()) {
 		ret = cpufreq_start_governor(policy);
 		if (ret)
-			pr_err("%s: Failed to start governor\n", __func__);
+			pr_err("%s: Failed to start governor for CPU%u, policy CPU%u\n",
+			       __func__, cpu, policy->cpu);
 	}
 	up_write(&policy->rwsem);
 	return ret;
@@ -1675,6 +1711,9 @@ void cpufreq_resume(void)
 	if (!cpufreq_driver)
 		return;
 
+	if (unlikely(!cpufreq_suspended))
+		return;
+
 	cpufreq_suspended = false;
 
 	if (!has_target() && !cpufreq_driver->resume)
@@ -1962,15 +2001,6 @@ int __cpufreq_driver_target(struct cpufreq_policy *policy,
 	pr_debug("target for CPU %u: %u kHz, relation %u, requested %u kHz\n",
 		 policy->cpu, target_freq, relation, old_target_freq);
 
-	/*
-	 * This might look like a redundant call as we are checking it again
-	 * after finding index. But it is left intentionally for cases where
-	 * exactly same freq is called again and so we can save on few function
-	 * calls.
-	 */
-	if (target_freq == policy->cur)
-		return 0;
-
 	/* Save last value to restore later on errors */
 	policy->restore_freq = policy->cur;
 
@@ -2223,6 +2253,10 @@ static int cpufreq_set_policy(struct cpufreq_policy *policy,
 	/* adjust if necessary - all reasons */
 	blocking_notifier_call_chain(&cpufreq_policy_notifier_list,
 			CPUFREQ_ADJUST, new_policy);
+
+	/* adjust if necessary - hardware incompatibility */
+	blocking_notifier_call_chain(&cpufreq_policy_notifier_list,
+			CPUFREQ_INCOMPATIBLE, new_policy);
 
 	/*
 	 * verify the cpu speed can be set within this limit, which might be
@@ -2547,7 +2581,7 @@ int cpufreq_register_driver(struct cpufreq_driver *driver_data)
 	hp_online = ret;
 	ret = 0;
 
-	pr_debug("driver %s up and running\n", driver_data->name);
+	pr_info("driver %s up and running\n", driver_data->name);
 	goto out;
 
 err_if_unreg:
@@ -2579,7 +2613,7 @@ int cpufreq_unregister_driver(struct cpufreq_driver *driver)
 	if (!cpufreq_driver || (driver != cpufreq_driver))
 		return -EINVAL;
 
-	pr_debug("unregistering driver %s\n", driver->name);
+	pr_info("unregistering driver %s\n", driver->name);
 
 	/* Protect against concurrent cpu hotplug */
 	cpus_read_lock();
