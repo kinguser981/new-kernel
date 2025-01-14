@@ -143,7 +143,7 @@ int i2c_devinfo_device_write(char *buf)
 	}
 
 	pr_info("20200115-i2c_devinfo_dev->val=%s\n",i2c_devinfo_dev->val);
-	
+
 	return 1;
 }
 EXPORT_SYMBOL(i2c_devinfo_device_write);
