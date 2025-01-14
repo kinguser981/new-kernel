@@ -12,9 +12,12 @@
 #ifndef _FSCRYPT_PRIVATE_H
 #define _FSCRYPT_PRIVATE_H
 
+#ifndef __FS_HAS_ENCRYPTION
 #define __FS_HAS_ENCRYPTION 1
+#endif
 #include <linux/fscrypt.h>
 #include <crypto/hash.h>
+#include <linux/pfk.h>
 
 /* Encryption parameters */
 #define FS_KEY_DERIVATION_NONCE_SIZE	16
@@ -87,6 +90,7 @@ struct fscrypt_info {
 	u8 ci_flags;
 	u8 ci_master_key_descriptor[FS_KEY_DESCRIPTOR_SIZE];
 	u8 ci_nonce[FS_KEY_DERIVATION_NONCE_SIZE];
+	u8 ci_raw_key[FS_MAX_KEY_SIZE];
 };
 
 typedef enum {
@@ -108,11 +112,20 @@ static inline bool fscrypt_valid_enc_modes(u32 contents_mode,
 	    filenames_mode == FS_ENCRYPTION_MODE_AES_256_CTS)
 		return true;
 
+	if (contents_mode == FS_ENCRYPTION_MODE_PRIVATE &&
+	    filenames_mode == FS_ENCRYPTION_MODE_AES_256_CTS)
+		return true;
+
 	if (contents_mode == FS_ENCRYPTION_MODE_ADIANTUM &&
 	    filenames_mode == FS_ENCRYPTION_MODE_ADIANTUM)
 		return true;
 
 	return false;
+}
+
+static inline bool is_private_data_mode(const struct fscrypt_context *ctx)
+{
+	return ctx->contents_encryption_mode == FS_ENCRYPTION_MODE_PRIVATE;
 }
 
 /* crypto.c */
